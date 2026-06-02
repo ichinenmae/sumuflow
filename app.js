@@ -715,6 +715,7 @@ function renderManage() {
     <div class="toolbar">
       <button class="primary-button" data-action="new-payment" type="button">支払いを追加</button>
       <button class="secondary-button" data-action="new-income" type="button">入金を追加</button>
+      <button class="danger-button" data-action="clear-ledger" type="button">入出金を全削除</button>
     </div>
     <div class="manage-grid">
       <section class="section-panel">
@@ -856,6 +857,7 @@ function handleAction(target) {
   if (action === "export-json") exportJson();
   if (action === "import-json") importFile.click();
   if (action === "reset-data") resetData();
+  if (action === "clear-ledger") clearLedger();
 }
 
 function findItem(type, id) {
@@ -933,6 +935,16 @@ function resetData() {
   StorageService.clear();
   state = createSeedData();
   saveAndRender();
+}
+
+function clearLedger() {
+  if (!confirm("支払いと入金予定をすべて削除し、現在残高も0にします。設定は残ります。実行しますか？")) return;
+  state.payments = [];
+  state.incomes = [];
+  state.balance.amount = 0;
+  state.balance.updatedAt = new Date().toISOString();
+  saveAndRender();
+  showToast("入出金データと残高を削除しました");
 }
 
 function appendImportedData(imported) {
