@@ -61,3 +61,5 @@
 - MAJOR: 互換性破壊
 - MINOR: 新機能追加
 - PATCH: バグ修正
+
+TEST
