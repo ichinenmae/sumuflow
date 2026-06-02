@@ -62,7 +62,8 @@ function createSeedData() {
     version: "1.0.0",
     balance: {
       amount: 18500,
-      updatedAt: `${today}T09:12:00`
+      updatedAt: `${today}T09:12:00`,
+      calculationMode: "ledger"
     },
     settings: {
       hourlyRate: 2000,
@@ -89,11 +90,32 @@ function createSeedData() {
 }
 
 function normalizeState(data) {
+  const payments = Array.isArray(data.payments) ? data.payments.map((item) => ({
+    id: item.id || makeId(),
+    name: item.name || "支払い",
+    amount: Number(item.amount || 0),
+    date: item.date || toDateInput(new Date()),
+    status: item.status === "paid" ? "paid" : "planned"
+  })) : [];
+  const incomes = Array.isArray(data.incomes) ? data.incomes.map((item) => ({
+    id: item.id || makeId(),
+    name: item.name || "入金",
+    amount: Number(item.amount || 0),
+    date: item.date || toDateInput(new Date())
+  })) : [];
+  const legacyAmount = Number(data.balance?.amount || 0);
+  const isLedgerMode = data.balance?.calculationMode === "ledger";
+  const today = todayInput();
+  const receivedTotal = sum(incomes.filter((income) => income.date <= today));
+  const paidTotal = sum(payments.filter((payment) => payment.status === "paid"));
+  const baseAmount = isLedgerMode ? legacyAmount : legacyAmount - receivedTotal + paidTotal;
+
   return {
     version: data.version || "1.0.0",
     balance: {
-      amount: Number(data.balance?.amount || 0),
-      updatedAt: data.balance?.updatedAt || new Date().toISOString()
+      amount: baseAmount,
+      updatedAt: data.balance?.updatedAt || new Date().toISOString(),
+      calculationMode: "ledger"
     },
     settings: {
       hourlyRate: Number(data.settings?.hourlyRate || 2000),
@@ -106,19 +128,8 @@ function normalizeState(data) {
       lastBackupAt: data.backup?.lastBackupAt || null,
       reminderDays: clampNumber(data.backup?.reminderDays ?? 7, 0, 90)
     },
-    payments: Array.isArray(data.payments) ? data.payments.map((item) => ({
-      id: item.id || makeId(),
-      name: item.name || "支払い",
-      amount: Number(item.amount || 0),
-      date: item.date || toDateInput(new Date()),
-      status: item.status === "paid" ? "paid" : "planned"
-    })) : [],
-    incomes: Array.isArray(data.incomes) ? data.incomes.map((item) => ({
-      id: item.id || makeId(),
-      name: item.name || "入金",
-      amount: Number(item.amount || 0),
-      date: item.date || toDateInput(new Date())
-    })) : []
+    payments,
+    incomes
   };
 }
 
@@ -200,12 +211,20 @@ function assessment(balanceAfter) {
   return "OK";
 }
 
+function currentBalance() {
+  const today = todayInput();
+  const receivedTotal = sum(state.incomes.filter((income) => income.date <= today));
+  const paidTotal = sum(state.payments.filter((payment) => payment.status === "paid"));
+  return state.balance.amount + receivedTotal - paidTotal;
+}
+
 function buildSimulation(untilDate) {
-  let balance = state.balance.amount;
+  const today = todayInput();
+  let balance = currentBalance();
   const events = [];
 
   state.incomes.forEach((income) => {
-    if (!untilDate || income.date <= untilDate) {
+    if (income.date > today && (!untilDate || income.date <= untilDate)) {
       events.push({ type: "income", date: income.date, amount: income.amount, name: income.name });
     }
   });
@@ -214,7 +233,7 @@ function buildSimulation(untilDate) {
     .filter((payment) => payment.status !== "paid")
     .forEach((payment) => {
       if (!untilDate || payment.date <= untilDate) {
-        events.push({ type: "payment", date: payment.date, amount: payment.amount, name: payment.name, id: payment.id });
+        events.push({ type: "payment", date: payment.date < today ? today : payment.date, amount: payment.amount, name: payment.name, id: payment.id });
       }
     });
 
@@ -259,6 +278,7 @@ function computeDashboard() {
   const dailyNeed = needAmount / remainingDays;
   const balanceAgeDays = Math.max(0, Math.floor((Date.now() - new Date(state.balance.updatedAt).getTime()) / 86400000));
   const simulation = buildSimulation(addDays(today, 31));
+  const balance = currentBalance();
 
   return {
     today,
@@ -271,7 +291,8 @@ function computeDashboard() {
     deliveryCount,
     dailyNeed,
     balanceAgeDays,
-    simulation
+    simulation,
+    balance
   };
 }
 
@@ -314,7 +335,7 @@ function monthlySimplePlan() {
   const incomes = state.incomes.filter((income) => income.date >= today && income.date <= endDate);
   const paymentTotal = sum(payments);
   const incomeTotal = sum(incomes);
-  const neededSales = Math.max(0, paymentTotal - state.balance.amount - incomeTotal);
+  const neededSales = Math.max(0, paymentTotal - currentBalance() - incomeTotal);
   const estimatedWorkDays = (30 / 7) * Number(state.settings.maxWeeklyWorkDays || 0);
   const workdaySales = estimatedWorkDays > 0 ? neededSales / estimatedWorkDays : 0;
   const workdayHours = workHoursForAmount(workdaySales);
@@ -467,7 +488,7 @@ function renderHome() {
   views.home.innerHTML = `
     ${model.overdue.length ? `<div class="alert"><strong>期限超過があります</strong><span>${model.overdue.length}件、合計${yen.format(overdueTotal)}の支払いが未完了です。</span></div>` : ""}
     ${backupAlert ? `<div class="alert alert-info"><strong>データ保存</strong><span>${backupAlert.message}</span><button class="secondary-button" data-action="export-json" type="button">今すぐ保存</button></div>` : ""}
-    ${model.balanceAgeDays >= 7 ? `<div class="alert"><strong>残高更新</strong><span>残高が7日以上更新されていません。</span></div>` : ""}
+    ${model.balanceAgeDays >= 7 ? `<div class="alert"><strong>残高調整</strong><span>残高が7日以上調整されていません。</span></div>` : ""}
     <div class="quick-actions">
       <button class="primary-button" data-action="new-payment" type="button">支払い追加</button>
       <button class="secondary-button" data-action="new-income" type="button">入金追加</button>
@@ -485,14 +506,15 @@ function renderHome() {
       </section>
       <section class="balance-panel">
         <div>
-          <p class="section-kicker">現在残高</p>
-          <div class="balance-value">${yen.format(state.balance.amount)}</div>
-          <p class="meta">最終更新 ${formatDateTime(state.balance.updatedAt)} / 経過 ${model.balanceAgeDays}日</p>
+          <p class="section-kicker">現在残高（自動計算）</p>
+          <div class="balance-value">${yen.format(model.balance)}</div>
+          <p class="meta">基準残高 ${yen.format(state.balance.amount)} / 最終調整 ${formatDateTime(state.balance.updatedAt)}</p>
         </div>
-        <form class="balance-form" data-action="update-balance">
-          <input name="balance" type="number" min="0" step="1" inputmode="numeric" value="${state.balance.amount}" aria-label="現在残高">
-          <button class="primary-button" type="submit">更新</button>
+        <form class="balance-form" data-action="adjust-balance">
+          <input name="actualBalance" type="number" min="0" step="1" inputmode="numeric" value="${model.balance}" aria-label="実際の残高">
+          <button class="primary-button" type="submit">差額調整</button>
         </form>
+        <p class="meta">実際の残高を入力すると、差額を「残高調整」の入金または支払いとして登録します。</p>
       </section>
     </div>
 
@@ -569,11 +591,11 @@ function dangerousPayments(simulation) {
       date: payment.date,
       name: payment.name,
       amount: payment.amount,
-      balance: state.balance.amount - payment.amount,
+      balance: currentBalance() - payment.amount,
       judgement: "期限超過",
-      shortage: Math.max(0, payment.amount - state.balance.amount),
-      requiredHours: state.settings.hourlyRate > 0 ? Math.max(0, payment.amount - state.balance.amount) / state.settings.hourlyRate : 0,
-      requiredDeliveries: deliveriesForAmount(Math.max(0, payment.amount - state.balance.amount)),
+      shortage: Math.max(0, payment.amount - currentBalance()),
+      requiredHours: state.settings.hourlyRate > 0 ? Math.max(0, payment.amount - currentBalance()) / state.settings.hourlyRate : 0,
+      requiredDeliveries: deliveriesForAmount(Math.max(0, payment.amount - currentBalance())),
       id: payment.id
     }));
 
@@ -715,7 +737,7 @@ function renderPayments() {
     .sort((a, b) => a.date.localeCompare(b.date))
     .map((payment) => {
       const row = simulation.find((item) => item.id === payment.id);
-      const judge = payment.status === "paid" ? "OK" : row?.judgement || assessment(state.balance.amount - payment.amount);
+      const judge = payment.status === "paid" ? "OK" : row?.judgement || assessment(currentBalance() - payment.amount);
       return `
         <article class="list-item">
           <div class="list-line"><strong>${payment.status === "paid" ? "✓" : "○"} ${escapeHtml(payment.name)}</strong><span class="amount">${yen.format(payment.amount)}</span></div>
@@ -863,6 +885,35 @@ function togglePaid(id) {
   saveAndRender();
 }
 
+function adjustBalance(actualBalance) {
+  const calculatedBalance = currentBalance();
+  const difference = Number(actualBalance) - calculatedBalance;
+  if (difference === 0) {
+    state.balance.updatedAt = new Date().toISOString();
+    saveAndRender();
+    showToast("差額はありません");
+    return;
+  }
+
+  const adjustment = {
+    id: makeId(),
+    name: "残高調整",
+    amount: Math.abs(difference),
+    date: todayInput()
+  };
+
+  if (difference > 0) {
+    state.incomes.push(adjustment);
+    showToast("差額を収入として調整しました");
+  } else {
+    state.payments.push({ ...adjustment, status: "paid" });
+    showToast("差額を支出として調整しました");
+  }
+
+  state.balance.updatedAt = new Date().toISOString();
+  saveAndRender();
+}
+
 function exportJson() {
   state.backup.lastBackupAt = new Date().toISOString();
   StorageService.save(state);
@@ -919,11 +970,9 @@ refreshButton.addEventListener("click", refreshDashboard);
 
 document.addEventListener("submit", (event) => {
   const form = event.target;
-  if (form.dataset.action === "update-balance") {
+  if (form.dataset.action === "adjust-balance") {
     event.preventDefault();
-    state.balance.amount = Number(new FormData(form).get("balance") || 0);
-    state.balance.updatedAt = new Date().toISOString();
-    saveAndRender();
+    adjustBalance(Number(new FormData(form).get("actualBalance") || 0));
   }
 
   if (form.dataset.action === "save-settings") {
